@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>生图 API 测试</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 32px auto; padding: 0 20px; max-width: 760px; font: 16px/1.6 system-ui, sans-serif; color: #202530; background: #f7f8fa; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  p { color: #596273; }
+  form { padding: 24px; background: white; border: 1px solid #dce0e7; border-radius: 12px; }
+  label { display: block; margin: 14px 0 6px; font-weight: 600; }
+  input, textarea, select, button { font: inherit; }
+  input, textarea, select { width: 100%; padding: 10px; border: 1px solid #bfc7d4; border-radius: 6px; }
+  textarea { resize: vertical; }
+  button { cursor: pointer; border: 0; border-radius: 6px; padding: 10px 18px; margin: 16px 8px 0 0; background: #235bd6; color: white; }
+  button.secondary { background: #e9edf5; color: #263957; }
+  button:disabled { opacity: .5; cursor: wait; }
+  #status { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #result { width: 100%; height: auto; border-radius: 8px; margin-top: 16px; }
+  #pose { font: 13px/1.5 monospace; }
+  #pose-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #pose-preview { display: block; max-width: 100%; max-height: 512px; margin-top: 16px; }
+  #pose-preview[hidden] { display: none; }
+  #pose-search-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #pose-matches { display: grid; gap: 12px; margin-top: 12px; }
+  .pose-match { padding: 14px; border: 1px solid #dce0e7; border-radius: 8px; }
+  .pose-match h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+  .pose-match p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pose-match small { color: #596273; }
+  a { color: #235bd6; }
+</style>
+<h1>生图 API 测试</h1>
+<p>上传图片并输入提示词，通过本地转发调用 443 接口。第一张为编辑目标，其余为参考图。</p>
+<form id="form">
+  <label for="token">API Token</label>
+  <input id="token" type="password" autocomplete="off" placeholder="输入部署时配置的 API Token" required>
+  <label for="images">图片（JPEG / PNG / WebP，可多选）</label>
+  <input id="images" type="file" accept="image/jpeg,image/png,image/webp" multiple required>
+  <p id="files"></p>
+  <label for="prompt">提示词</label>
+  <textarea id="prompt" rows="4" placeholder="例如：将 &lt;image1&gt; 的背景改成浅黄色，保留主体。" required></textarea>
+  <label for="pose-query">根据描述找姿势（可选）</label>
+  <input id="pose-query" type="text" placeholder="例如：坐在地上，双手撑在身后">
+  <label for="pose-library">检索范围</label>
+  <select id="pose-library">
+    <option value="default">原有姿势库（默认）</option>
+    <option value="mixamo">Mixamo 扩展库</option>
+    <option value="all">全部姿势库</option>
+  </select>
+  <label for="pose-top-k">候选数量 k</label>
+  <input id="pose-top-k" type="number" min="1" step="1" value="5">
+  <button id="search-poses" class="secondary" type="button">查找姿势</button>
+  <p id="pose-search-status" role="status" aria-live="polite">输入描述和 API Token 即可搜索，无需先上传图片。</p>
+  <div id="pose-matches" aria-label="姿势搜索结果"></div>
+  <label for="pose-file">人体姿态 JSON（可选）</label>
+  <input id="pose-file" type="file" accept=".json,application/json">
+  <label for="pose">姿态内容</label>
+  <textarea id="pose" rows="8" spellcheck="false" placeholder="导入或粘贴完整姿态对象，例如检索结果中的 matches[i].pose；留空使用普通编辑。"></textarea>
+  <p>填写姿态时，可只上传一张人物图：服务端按该图画幅渲染 image1 人偶图，并将人物图保留为 image2。上传多张时，第一张作为画幅图并替换为人偶图，第二张为人物参考，其余图片顺序不变。预览按第一张图片比例显示，生成画幅由服务端确定。</p>
+  <button id="preview-pose" class="secondary" type="button">预览姿态</button>
+  <button id="clear-pose" class="secondary" type="button">清除姿态</button>
+  <p id="pose-status" role="status" aria-live="polite">未提供姿态，将使用普通编辑。</p>
+  <img id="pose-preview" alt="人体姿态预览" hidden>
+  <hr>
+  <button id="generate" type="submit">开始生成</button>
+  <button id="ready" class="secondary" type="button">检查服务就绪</button>
+</form>
+<p id="status" role="status" aria-live="polite">等待提交。生成可能需要数分钟。</p>
+<section id="output" hidden>
+  <a id="download" download="result.png">下载结果 PNG</a>
+  <img id="result" alt="生成结果">
+</section>
+<script>
+  const form = document.getElementById('form');
+  const token = document.getElementById('token');
+  const images = document.getElementById('images');
+  const prompt = document.getElementById('prompt');
+  const status = document.getElementById('status');
+  const ready = document.getElementById('ready');
+  const generate = document.getElementById('generate');
+  const output = document.getElementById('output');
+  const pose = document.getElementById('pose');
+  const poseFile = document.getElementById('pose-file');
+  const poseStatus = document.getElementById('pose-status');
+  const posePreview = document.getElementById('pose-preview');
+  const previewPose = document.getElementById('preview-pose');
+  const poseQuery = document.getElementById('pose-query');
+  const poseLibrary = document.getElementById('pose-library');
+  const poseTopK = document.getElementById('pose-top-k');
+  const searchPoses = document.getElementById('search-poses');
+  const poseSearchStatus = document.getElementById('pose-search-status');
+  const poseMatches = document.getElementById('pose-matches');
+  let resultUrl;
+
+  images.addEventListener('change', () => {
+    document.getElementById('files').textContent = Array.from(images.files, (file, i) => `${i + 1}. ${file.name}`).join(' / ');
+    resetPreview();
+  });
+
+  function readPose() {
+    if (!pose.value.trim()) return null;
+    const data = JSON.parse(pose.value);
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !['bones', 'characters', 'poses', 'image_poses'].some(key => key in data)) {
+      throw new Error('请提供完整姿态 JSON 对象，如 matches[i].pose，而非整个检索响应。');
+    }
+    return data;
+  }
+
+  function resetPreview() {
+    posePreview.hidden = true;
+    posePreview.removeAttribute('src');
+    poseStatus.textContent = pose.value.trim() ? '姿态 JSON 已更新，可预览或直接提交。' : '未提供姿态，将使用普通编辑。';
+  }
+
+  pose.addEventListener('input', resetPreview);
+  document.getElementById('clear-pose').addEventListener('click', () => {
+    pose.value = poseFile.value = '';
+    resetPreview();
+  });
+  poseFile.addEventListener('change', async () => {
+    const file = poseFile.files[0];
+    if (!file) return;
+    try {
+      pose.value = await file.text();
+      resetPreview();
+      await renderPreview();
+    } catch (error) {
+      poseStatus.textContent = `读取姿态失败：${error.message}`;
+    }
+  });
+
+  async function renderPreview() {
+    if (previewPose.disabled) return;
+    resetPreview();
+    let data;
+    try {
+      data = readPose();
+    } catch (error) {
+      poseStatus.textContent = `姿态 JSON 无效：${error.message}`;
+      return;
+    }
+    if (data === null) return;
+    const source = pose.value;
+    const imageFile = images.files[0];
+    const frame = document.createElement('iframe');
+    frame.title = '姿态渲染';
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.cssText = 'position:fixed;left:-10000px;width:512px;height:512px;border:0';
+    let timer;
+    try {
+      previewPose.disabled = true;
+      poseStatus.textContent = '正在渲染人体姿态…';
+      const render = async () => {
+        let width = 512, height = 512;
+        if (imageFile) {
+          const bitmap = await createImageBitmap(imageFile);
+          const scale = Math.min(1, 768 / Math.max(bitmap.width, bitmap.height));
+          width = Math.max(1, Math.round(bitmap.width * scale));
+          height = Math.max(1, Math.round(bitmap.height * scale));
+          bitmap.close();
+        }
+        await new Promise((resolve, reject) => {
+          frame.onload = resolve;
+          frame.onerror = () => reject(new Error('渲染页面加载失败'));
+          frame.src = '/pose-preview';
+          document.body.appendChild(frame);
+        });
+        if (typeof frame.contentWindow.renderPose !== 'function') throw new Error('渲染模块或本地资源不可用');
+        return frame.contentWindow.renderPose(data, width, height);
+      };
+      const image = await Promise.race([
+        render(),
+        new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('预览超时')), 30000);
+        }),
+      ]);
+      if (pose.value !== source || images.files[0] !== imageFile) return;
+      posePreview.src = image;
+      posePreview.hidden = false;
+      poseStatus.textContent = '姿态预览完成。提交时发送上方 JSON，由服务端重新渲染。';
+    } catch (error) {
+      if (pose.value === source && images.files[0] === imageFile) {
+        poseStatus.textContent = `无法预览：${error.message}\n姿态 JSON 保留在上方，仍可提交 edit 接口测试。`;
+      }
+    } finally {
+      clearTimeout(timer);
+      frame.remove();
+      previewPose.disabled = false;
+    }
+  }
+
+  previewPose.addEventListener('click', renderPreview);
+
+  async function checkResponse(response) {
+    if (response.ok) return;
+    const text = await response.text();
+    let message = text.slice(0, 1000);
+    if ((response.headers.get('content-type') || '').includes('application/json')) {
+      const data = JSON.parse(text);
+      message = [data.error?.code, data.error?.message, data.request_id].filter(Boolean).join('\n') || message;
+    }
+    throw new Error(`HTTP ${response.status}\n${message}`);
+  }
+
+  async function searchByDescription() {
+    if (searchPoses.disabled || !token.reportValidity()) return;
+    const query = poseQuery.value.trim();
+    const topK = Number(poseTopK.value);
+    if (!query) {
+      poseSearchStatus.textContent = '请输入姿势描述。';
+      poseQuery.focus();
+      return;
+    }
+    if (!poseTopK.reportValidity() || !Number.isSafeInteger(topK) || topK < 1) {
+      poseSearchStatus.textContent = '候选数量 k 必须是正整数。';
+      return;
+    }
+    searchPoses.disabled = true;
+    poseMatches.replaceChildren();
+    poseSearchStatus.textContent = '正在查找相近姿势…';
+    try {
+      const response = await fetch('/api/pose/search', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token.value.trim()}`, 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ query, top_k: topK, library: poseLibrary.value }),
+      });
+      await checkResponse(response);
+      const data = await response.json();
+      for (const [index, match] of data.matches.entries()) {
+        const card = document.createElement('article');
+        card.className = 'pose-match';
+        const title = document.createElement('h3');
+        title.textContent = `${index + 1}. ${match.pose_id}`;
+        const score = document.createElement('small');
+        score.textContent = `相似度 ${match.score.toFixed(4)}`;
+        const zh = document.createElement('p');
+        zh.lang = 'zh';
+        zh.textContent = match.description.zh;
+        const en = document.createElement('p');
+        en.lang = 'en';
+        en.textContent = match.description.en;
+        const choose = document.createElement('button');
+        choose.type = 'button';
+        choose.className = 'secondary';
+        choose.textContent = '使用此姿态';
+        choose.addEventListener('click', () => {
+          pose.value = JSON.stringify(match.pose, null, 2);
+          poseFile.value = '';
+          resetPreview();
+          renderPreview();
+        });
+        card.append(title, score, zh, en, choose);
+        poseMatches.appendChild(card);
+      }
+      poseSearchStatus.textContent = data.matches.length ? `找到 ${data.matches.length} 个候选，按相似度排序。选择后可预览或直接生成。` : '没有找到匹配的姿势。';
+    } catch (error) {
+      poseSearchStatus.textContent = `查找姿势失败：${error.message}`;
+    } finally {
+      searchPoses.disabled = false;
+    }
+  }
+
+  searchPoses.addEventListener('click', searchByDescription);
+  poseQuery.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      searchByDescription();
+    }
+  });
+
+  async function run(generating) {
+    if (!token.reportValidity()) return;
+    generate.disabled = ready.disabled = true;
+    const start = Date.now();
+    const label = generating ? '正在上传 / 排队 / 生成，请等待' : '正在检查服务就绪状态';
+    status.textContent = label;
+    const timer = setInterval(() => {
+      status.textContent = `${label}… 已等待 ${Math.floor((Date.now() - start) / 1000)} 秒`;
+    }, 1000);
+    try {
+      const options = { headers: { Authorization: `Bearer ${token.value.trim()}` }, cache: 'no-store' };
+      if (generating) {
+        const body = new FormData();
+        const poseData = readPose();
+        body.append('prompt', prompt.value);
+        for (const image of images.files) body.append('images', image);
+        if (poseData !== null) body.append('pose', pose.value);
+        options.method = 'POST';
+        options.body = body;
+      }
+      const response = await fetch(generating ? '/api/image/edit' : '/ready', options);
+      await checkResponse(response);
+      if (generating) {
+        if (response.headers.get('content-type')?.split(';')[0] !== 'image/png') {
+          throw new Error('接口未返回 PNG 图片');
+        }
+        const blob = await response.blob();
+        if (resultUrl) URL.revokeObjectURL(resultUrl);
+        resultUrl = URL.createObjectURL(blob);
+        document.getElementById('result').src = resultUrl;
+        document.getElementById('download').href = resultUrl;
+        output.hidden = false;
+        status.textContent = `生成完成，用时 ${((Date.now() - start) / 1000).toFixed(1)} 秒。`;
+      } else {
+        status.textContent = '服务已就绪，可以提交生成。';
+      }
+    } catch (error) {
+      status.textContent = `请求失败：${error.message}`;
+    } finally {
+      clearInterval(timer);
+      generate.disabled = ready.disabled = false;
+    }
+  }
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    output.hidden = true;
+    run(true);
+  });
+  ready.addEventListener('click', () => run(false));
+</script>
+</html>

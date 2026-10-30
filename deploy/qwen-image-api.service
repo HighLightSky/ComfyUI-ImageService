@@ -1,0 +1,25 @@
+[Unit]
+Description=Qwen memory image API
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=liu
+WorkingDirectory=/home/liu/wzt/ComfyUI/custom_nodes/ComfyUI-ImageService
+EnvironmentFile=/etc/qwen-image-api.env
+ExecStart=/home/liu/wzt/ComfyUI/.venv/bin/python /home/liu/wzt/ComfyUI/custom_nodes/ComfyUI-ImageService/launch.py --api
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=50
+LimitCORE=0
+MemorySwapMax=0
+UMask=0077
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

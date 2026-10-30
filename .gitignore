@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.log
+.env
+/image_service/pose_annotations/
+/image_service/pose_library/

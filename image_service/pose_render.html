@@ -1,0 +1,96 @@
+<!doctype html>
+<meta charset="utf-8">
+<canvas id="view" width="512" height="512"></canvas>
+<script type="module">
+import {PoseViewerCore} from '/pose_studio/core.js';
+import {loadMorphPack, solveMorph, buildStaticModelData} from '/pose_studio/morph_runtime.mjs';
+import {extractActivePoseFromSceneAsset} from '/pose_studio/characters.mjs';
+import {resolveCaptureCameraParams} from '/pose_studio/animation.mjs';
+
+function modelData(pack, mesh) {
+    const solved = solveMorph(pack, mesh);
+    const fixed = buildStaticModelData(pack, solved.includeGenitals);
+    const bones = fixed.bones.map((bone, index) => {
+        const offset = index * 6;
+        const headPos = Array.from(solved.bonePositions.subarray(offset, offset + 3));
+        const tailPos = Array.from(solved.bonePositions.subarray(offset + 3, offset + 6));
+        return {name: bone.name, parent: bone.parent || null, headPos, tailPos,
+            length: Math.hypot(...tailPos.map((value, axis) => value - headPos[axis]))};
+    });
+    return {vertices: solved.vertices, uvs: fixed.uvs, indices: fixed.indices, bones,
+        skinIndices: fixed.skinIndices, skinWeights: fixed.skinWeights,
+        landmarks: solved.landmarks, landmark_indices: solved.landmarkIndices};
+}
+
+function applyProportions(viewer, mesh) {
+    viewer.headScale = mesh.head_size ?? 1;
+    viewer.armScale = mesh.arm_size ?? 1;
+    viewer.handScale = mesh.hand_size ?? 1;
+    viewer.footScale = mesh.foot_size ?? 1;
+    const arm = mesh.arm_length ?? 0.5;
+    const leg = mesh.leg_length ?? 0.5;
+    viewer.boneLengthParams = {
+        shoulder_l: mesh.shoulder_l_length ?? 0.5, shoulder_r: mesh.shoulder_r_length ?? 0.5,
+        hip_l: mesh.hip_l_length ?? 0.5, hip_r: mesh.hip_r_length ?? 0.5,
+        upper_arm_l: mesh.upper_arm_l_length ?? mesh.upper_arm_length ?? arm,
+        upper_arm_r: mesh.upper_arm_r_length ?? mesh.upper_arm_length ?? arm,
+        forearm_l: mesh.forearm_l_length ?? mesh.forearm_length ?? arm,
+        forearm_r: mesh.forearm_r_length ?? mesh.forearm_length ?? arm,
+        thigh_l: mesh.thigh_l_length ?? mesh.thigh_length ?? leg,
+        thigh_r: mesh.thigh_r_length ?? mesh.thigh_length ?? leg,
+        shin_l: mesh.shin_l_length ?? mesh.shin_length ?? leg,
+        shin_r: mesh.shin_r_length ?? mesh.shin_length ?? leg,
+        spine: mesh.spine_length ?? 0.5,
+    };
+}
+
+window.renderPose = async (document, width, height) => {
+    const viewer = new PoseViewerCore(window.document.getElementById('view'), {
+        skinMode: 'naked', enableTextureSkinning: true,
+        showSkeletonHelper: false, showCaptureFrame: false, ikEnabled: false,
+    });
+    try {
+        await viewer.init();
+        if (!viewer.initialized) throw viewer.initializationError;
+        viewer.setDirectionalSkydomeVisible(false);
+        viewer.setSkinMode('naked');
+        const pack = await loadMorphPack();
+        const characters = document.characters?.length ? document.characters : [{
+            id: 'character-1', mesh: document.mesh || {},
+            poses: document.poses || document.image_poses || [document], transform: {},
+        }];
+        const active = characters.find(character => character.id === document.active_character_id) || characters[0];
+        const poseIndex = document.activeTab || 0;
+        const activePose = extractActivePoseFromSceneAsset(document) || active.poses?.[poseIndex] || active.poses?.[0] || document;
+        const cameraFor = (character, pose) => resolveCaptureCameraParams(pose.cameraParams, {
+            offset_x: character.transform?.x ?? 0, offset_y: character.transform?.y ?? 0,
+            zoom: character.transform?.zoom ?? 1,
+            yaw_deg: document.export?.cam_yaw_deg ?? 0, pitch_deg: document.export?.cam_pitch_deg ?? 0,
+        });
+        const appearance = (character, camera) => ({color: character.color || '#ffffff', transform: {
+            ...character.transform, x: camera.offset_x, y: camera.offset_y, zoom: camera.zoom,
+        }});
+        for (const character of [...characters.filter(character => character !== active), active]) {
+            const pose = character === active ? activePose : character.poses?.[poseIndex] || character.poses?.[0] || {};
+            const mesh = character.mesh || {};
+            applyProportions(viewer, mesh);
+            viewer.resetSceneCameraTarget();
+            viewer.loadData(modelData(pack, mesh), true);
+            viewer.setPose(pose, true);
+            const camera = cameraFor(character, pose);
+            viewer.setActiveCharacterAppearance(appearance(character, camera));
+            await viewer.waitForCaptureReady();
+            if (character !== active) {
+                viewer.upsertPassiveCharacterFromActive(character.id, {pose, ...appearance(character, camera)});
+            }
+        }
+        viewer.updateLights([{type: 'ambient', color: '#ffffff', intensity: 1}]);
+        const camera = cameraFor(active, activePose);
+        const image = viewer.capture(width, height, 1, [255, 255, 255], 0, 0, camera.yaw_deg, camera.pitch_deg);
+        if (!image) throw new Error('Pose capture failed');
+        return image;
+    } finally {
+        viewer.dispose();
+    }
+};
+</script>

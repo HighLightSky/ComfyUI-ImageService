@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<canvas id="view" width="512" height="512"></canvas>
+<script type="module">
+import {PoseViewerCore} from '/pose_studio/core.js';
+import {loadMorphPack, solveMorph, buildStaticModelData} from '/pose_studio/morph_runtime.mjs';
+import {importMixamoFBXAnimation} from '/pose_studio/imports/mixamo.js';
+
+const viewer = new PoseViewerCore(document.getElementById('view'), {
+    skinMode: 'dummy', enableTextureSkinning: true,
+    showSkeletonHelper: false, showCaptureFrame: false, ikEnabled: false,
+});
+await viewer.init();
+if (!viewer.initialized) throw viewer.initializationError;
+const pack = await loadMorphPack();
+const solved = solveMorph(pack, {});
+const fixed = buildStaticModelData(pack, solved.includeGenitals);
+const bones = fixed.bones.map((bone, index) => {
+    const offset = index * 6;
+    const headPos = Array.from(solved.bonePositions.subarray(offset, offset + 3));
+    const tailPos = Array.from(solved.bonePositions.subarray(offset + 3, offset + 6));
+    return {name: bone.name, parent: bone.parent || null, headPos, tailPos,
+        length: Math.hypot(...tailPos.map((value, axis) => value - headPos[axis]))};
+});
+viewer.loadData({vertices: solved.vertices, uvs: fixed.uvs, indices: fixed.indices, bones,
+    skinIndices: fixed.skinIndices, skinWeights: fixed.skinWeights,
+    landmarks: solved.landmarks, landmark_indices: solved.landmarkIndices}, true);
+viewer.setDirectionalSkydomeVisible(false);
+viewer.setSkinMode('dummy');
+viewer.updateLights([{type: 'ambient', color: '#ffffff', intensity: 1}]);
+await viewer.waitForCaptureReady();
+
+const jointNames = ['pelvis', 'spine_03', 'neck_01', 'head',
+    'upperarm_l', 'lowerarm_l', 'hand_l', 'upperarm_r', 'lowerarm_r', 'hand_r',
+    'thigh_l', 'calf_l', 'foot_l', 'ball_l', 'thigh_r', 'calf_r', 'foot_r', 'ball_r'];
+const point = name => viewer.bones[name].getWorldPosition(new viewer.THREE.Vector3());
+const height = point('head').y - Math.min(point('foot_l').y, point('foot_r').y);
+
+window.convertClip = async index => {
+    const bytes = await (await fetch(`/fbx/${index}`)).arrayBuffer();
+    const result = await importMixamoFBXAnimation(new File([bytes], 'motion.fbx'), viewer, {fps: 12, maxFrames: 48});
+    const frames = result.poseSamples.map((pose, index) => {
+        viewer.setPose(pose, true);
+        const origin = point('pelvis');
+        const joints = Object.fromEntries(jointNames.map(name => [name, point(name).sub(origin).divideScalar(height).toArray()]));
+        return {pose, joints, time: result.sampleTimes[index]};
+    });
+    return {duration: result.duration, frames};
+};
+
+window.previewPose = async pose => {
+    viewer.setPose(pose, true);
+    await viewer.waitForCaptureReady();
+    return viewer.capture(512, 512, 1, [255, 255, 255], 0, 0, 0, 0);
+};
+</script>
